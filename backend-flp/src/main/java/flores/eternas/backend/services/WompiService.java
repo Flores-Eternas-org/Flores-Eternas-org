@@ -35,6 +35,7 @@ public class WompiService {
     private final String publicKey;
     private final String integritySecret;
     private final String privateKey;
+    private final String eventsKey;
     private final String wompiUrl;
 
     /**
@@ -42,7 +43,8 @@ public class WompiService {
      * @param emailService servicio de email para notificaciones
      * @param publicKey      llave pública de Wompi (WOMPI_PUBLIC_KEY)
      * @param integritySecret secreto de integridad de Wompi (WOMPI_INTEGRITY_SECRET)
-     * @param privateKey     llave privada de Wompi (WOMPI_PRIVATE_KEY) para verificar webhooks
+     * @param privateKey     llave privada de Wompi (WOMPI_PRIVATE_KEY)
+     * @param eventsKey      secreto de eventos de Wompi (WOMPI_EVENTS_KEY) para verificar webhooks
      * @param wompiUrl       URL base del API de Wompi (WOMPI_URL)
      * @author demonicp
      */
@@ -51,12 +53,14 @@ public class WompiService {
                         @Value("${WOMPI_PUBLIC_KEY:}") String publicKey,
                         @Value("${WOMPI_INTEGRITY_SECRET:}") String integritySecret,
                         @Value("${WOMPI_PRIVATE_KEY:}") String privateKey,
+                        @Value("${WOMPI_EVENTS_KEY:}") String eventsKey,
                         @Value("${WOMPI_URL:https://sandbox.wompi.co/v1}") String wompiUrl) {
         this.pedidoRepository = pedidoRepository;
         this.emailService = emailService;
         this.publicKey = publicKey;
         this.integritySecret = integritySecret;
         this.privateKey = privateKey;
+        this.eventsKey = eventsKey;
         this.wompiUrl = wompiUrl;
     }
 
@@ -65,6 +69,7 @@ public class WompiService {
         log.info("WOMPI_PUBLIC_KEY loaded: {}", publicKey != null && !publicKey.isBlank());
         log.info("WOMPI_INTEGRITY_SECRET loaded: {}", integritySecret != null && !integritySecret.isBlank());
         log.info("WOMPI_PRIVATE_KEY loaded: {}", privateKey != null && !privateKey.isBlank());
+        log.info("WOMPI_EVENTS_KEY loaded: {}", eventsKey != null && !eventsKey.isBlank());
     }
 
     /**
@@ -177,16 +182,20 @@ public class WompiService {
     }
 
     /**
-     * Verifica la firma del webhook de Wompi según su documentación.
-     * Wompi envía en el body: signature.checksum y signature.properties.
-     * El checksum es SHA256 de la concatenación de los valores de las properties
-     * extraídos del payload (ej: transaction.id -> data.transaction.id).
+     * Verifica la firma del webhook de Wompi según su documentación oficial.
+     * Fórmula: SHA256(valores de signature.properties concatenados en orden
+     * + campo timestamp del evento + secreto de eventos WOMPI_EVENTS_KEY).
      * @param payload JSON parseado del webhook
      * @return true si la firma es válida
      * @author demonicp
      */
     public boolean validarFirmaWebhook(Map<String, Object> payload) {
         try {
+            if (eventsKey == null || eventsKey.isBlank()) {
+                log.warn("WOMPI_EVENTS_KEY no configurada — no se puede verificar firma del webhook");
+                return false;
+            }
+
             Map<String, Object> signature = (Map<String, Object>) payload.get("signature");
             if (signature == null) {
                 log.warn("Webhook sin campo signature");
@@ -211,6 +220,14 @@ public class WompiService {
                 concatenado.append(valor);
             }
 
+            Object timestamp = payload.get("timestamp");
+            if (timestamp == null) {
+                log.warn("Webhook sin campo timestamp");
+                return false;
+            }
+            concatenado.append(timestamp);
+            concatenado.append(eventsKey);
+
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             byte[] hash = md.digest(concatenado.toString().getBytes("UTF-8"));
             StringBuilder hex = new StringBuilder();
@@ -218,10 +235,9 @@ public class WompiService {
                 hex.append(String.format("%02x", b));
             }
             String calculated = hex.toString();
-            boolean valida = calculated.equals(checksum);
+            boolean valida = calculated.equalsIgnoreCase(checksum);
             if (!valida) {
-                log.warn("Firma webhook invalida. Esperada: {}, Calculada: {}, Concatenado: {}",
-                        checksum, calculated, concatenado);
+                log.warn("Firma webhook invalida. Esperada: {}, Calculada: {}", checksum, calculated);
             }
             return valida;
         } catch (Exception e) {
